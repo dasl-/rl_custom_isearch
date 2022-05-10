@@ -114,7 +114,7 @@ mod readline {
         impl HistEntry {
             pub fn get_line(&self) -> &[u8] {
                 if self.line.is_null() { return &[0;0]; }
-                unsafe{ CStr::from_ptr(self.line) }.to_bytes()
+                unsafe{ CStr::from_ptr(self.line as *const u8) }.to_bytes()
             }
         }
 
