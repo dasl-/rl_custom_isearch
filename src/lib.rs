@@ -131,7 +131,7 @@ mod readline {
                 lazy_static! {
                     pub static ref $name: ::DynlibResult<$type> = unsafe {
                         dlsym!($handle, stringify!($name)).or_else(|_|
-                            dynlib_call!(dlopen(b"libreadline.so\0".as_ptr() as _, libc::RTLD_NOLOAD | libc::RTLD_LAZY))
+                            dynlib_call!(dlopen(b"libreadline.dylib\0".as_ptr() as _, libc::RTLD_NOLOAD | libc::RTLD_LAZY))
                             .and_then(|lib| dlsym!(lib, stringify!($name)))
                         )};
                 }
