@@ -6,7 +6,14 @@ GNU readline or libedit's readline emulation layer as a shared library
 
 ## What's different from upstream
 
-Upstream `rl_custom_isearch` works by:
+This fork is self-contained: a single `.so` does the whole job. The
+upstream design splits the work across two repos
+([`lincheney/rl_custom_isearch`](https://github.com/lincheney/rl_custom_isearch)
+and [`lincheney/rl_custom_function`](https://github.com/lincheney/rl_custom_function))
+plus an `~/.inputrc` snippet plus a separate shell-script binary; this
+fork has no second-repo equivalent and no inputrc requirement.
+
+Upstream [`rl_custom_isearch`](https://github.com/lincheney/rl_custom_isearch) works by:
 
 1. Loading the companion library
    [`rl_custom_function`](https://github.com/lincheney/rl_custom_function)
@@ -48,15 +55,37 @@ Output: `./target/release/librl_custom_isearch.so` (~380 KB).
 ```bash
 LD_PRELOAD=/path/to/librl_custom_isearch.so php -a
 LD_PRELOAD=/path/to/librl_custom_isearch.so mysql
-LD_PRELOAD=/path/to/librl_custom_isearch.so python3 -i   # apt python; or set PYTHON_BASIC_REPL=1 on Python 3.13+
+PYTHON_BASIC_REPL=1 LD_PRELOAD=/path/to/librl_custom_isearch.so python3 -i
 LD_PRELOAD=/path/to/librl_custom_isearch.so irb --legacy
 ```
+
+`PYTHON_BASIC_REPL=1` is required on Python 3.13+ to bypass `_pyrepl`
+(the pure-Python line editor that doesn't go through readline). On older
+Python it's harmless.
 
 Press `Ctrl+R` (or `Ctrl+S`) to invoke fzf over the current history. The
 selected entry replaces the current line and the cursor lands at
 end-of-line.
 
 Set `RL_FZF_DEBUG=1` to log registration and invocation events to stderr.
+
+### Loading globally
+
+To get the shim on every interactive REPL without prefixing each command,
+export `LD_PRELOAD` from your shell rc. Add to `~/.zshrc` (or
+`~/.bashrc`):
+
+```bash
+export LD_PRELOAD=/path/to/librl_custom_isearch.so
+```
+
+`LD_PRELOAD` is per-process and inherited by children, so anything
+launched from an interactive shell will pick it up. Programs that don't
+use readline simply ignore the shim. Setting it globally is safe for
+day-to-day shells but **don't** export it from anything that runs setuid
+or under unusual privileges — the dynamic linker strips `LD_PRELOAD` for
+setuid binaries anyway, but exporting from a privileged context is bad
+hygiene.
 
 ## Configuration
 
@@ -98,6 +127,8 @@ inputrc takes precedence over the shim.
 
 ## License
 
-GPL-3.0-or-later. Originally authored by Cheney Lin (upstream
-`lincheney/rl_custom_isearch`); rewritten with libedit support and
-programmatic registration on the `libedit-support` branch.
+GPL-3.0-or-later. Originally authored by [Cheney
+Lin](https://github.com/lincheney) (upstream
+[`lincheney/rl_custom_isearch`](https://github.com/lincheney/rl_custom_isearch));
+rewritten with libedit support and programmatic registration on the
+`libedit-support` branch.
