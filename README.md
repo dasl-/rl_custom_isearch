@@ -1,8 +1,8 @@
 # rl_custom_isearch
 
-Hack to add fzf-style history search (`Ctrl+R`) to programs that use GNU
-readline or libedit's readline emulation layer (e.g. `php -a`, `mysql`,
-`python -i`, `irb --legacy`, `bash`).
+Hack to add fzf-style history search (`Ctrl+R`) to programs that link
+GNU readline or libedit's readline emulation layer as a shared library
+(e.g. `php -a`, `mysql`, `python -i`, `irb --legacy`).
 
 ## What's different from upstream
 
@@ -49,7 +49,6 @@ Output: `./target/release/librl_custom_isearch.so` (~370 KB).
 LD_PRELOAD=/path/to/librl_custom_isearch.so php -a
 LD_PRELOAD=/path/to/librl_custom_isearch.so mysql
 LD_PRELOAD=/path/to/librl_custom_isearch.so python3 -i   # apt python; or set PYTHON_BASIC_REPL=1 on Python 3.13+
-LD_PRELOAD=/path/to/librl_custom_isearch.so bash
 LD_PRELOAD=/path/to/librl_custom_isearch.so irb --legacy
 ```
 
@@ -75,6 +74,20 @@ readline/libedit entirely cannot be intercepted by this shim:
   `PYTHON_BASIC_REPL=1` to fall back to readline, where the shim works.
 - **Modern `irb`** uses `reline` (pure Ruby). Pass `--legacy` to use the
   `readline` extension instead.
+
+Programs that statically embed readline rather than linking it as a shared
+library also can't be intercepted, because their internal calls to
+`readline()` don't go through the dynamic linker:
+
+- **`bash` on Debian/Ubuntu** is built with bundled readline sources
+  compiled into the binary. `ldd $(which bash)` shows no `libreadline.so`
+  dependency. (Some older distros and custom builds dynamically link
+  libreadline; those would work.)
+
+If a user `.inputrc` rebinds `Ctrl+R` to something else, that binding wins
+— readline's init reads `~/.inputrc` after the first `readline()` call,
+which is after we register, so an explicit `"\C-r": ...` line in your
+inputrc takes precedence over the shim.
 
 ## Requires
 

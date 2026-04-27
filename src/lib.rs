@@ -10,12 +10,13 @@ use std::sync::{Once, OnceLock};
 type rl_command_func_t = extern "C" fn(c_int, c_int) -> c_int;
 type rl_vcpfunc_t = extern "C" fn(*mut c_char);
 
-#[repr(C)]
-struct HistEntry {
-    line: *const c_char,
-    timestamp: *const c_char,
-    data: *const c_void,
-}
+const CTRL_R: c_int = 0x12;
+const CTRL_S: c_int = 0x13;
+
+// Opaque: HIST_ENTRY layout differs between libreadline (line, timestamp, data)
+// and libedit (line, data). We never form a Rust reference to the whole struct;
+// callers read just the line pointer via raw projection.
+enum HistEntry {}
 
 unsafe fn dlsym_named(handle: *mut c_void, name: &str) -> *mut c_void {
     let n = CString::new(name).unwrap();
@@ -23,8 +24,8 @@ unsafe fn dlsym_named(handle: *mut c_void, name: &str) -> *mut c_void {
 }
 
 /// Find an already-loaded libreadline or libedit and return a handle to it.
-/// Required because some hosts (Python's C extension) load it with RTLD_LOCAL,
-/// which hides its symbols from RTLD_DEFAULT / RTLD_NEXT.
+/// Required because some processes (Python's C extension) load it with
+/// RTLD_LOCAL, which hides its symbols from RTLD_DEFAULT / RTLD_NEXT.
 fn line_lib() -> *mut c_void {
     static LIB: OnceLock<usize> = OnceLock::new();
     let h = *LIB.get_or_init(|| {
@@ -53,44 +54,27 @@ fn line_lib() -> *mut c_void {
                 &mut handle as *mut *mut c_void as *mut c_void,
             );
         }
-        if handle.is_null() {
-            for name in [
-                b"libreadline.so.8\0".as_ptr(),
-                b"libreadline.so\0".as_ptr(),
-                b"libedit.so.0\0".as_ptr(),
-                b"libedit.so.2\0".as_ptr(),
-                b"libedit.so\0".as_ptr(),
-            ] {
-                let h = unsafe {
-                    libc::dlopen(
-                        name as *const c_char,
-                        libc::RTLD_NOLOAD | libc::RTLD_LAZY,
-                    )
-                };
-                if !h.is_null() {
-                    handle = h;
-                    break;
-                }
-            }
-        }
         handle as usize
     });
     h as *mut c_void
 }
 
-unsafe fn resolve_raw(name: &str) -> *mut c_void {
-    let mut p = dlsym_named(libc::RTLD_DEFAULT, name);
-    if p.is_null() {
-        let h = line_lib();
-        if !h.is_null() {
-            p = dlsym_named(h, name);
-        }
+/// Look up `name` starting from `primary`; if NULL, fall back to a private
+/// handle on the loaded libreadline/libedit (covers RTLD_LOCAL hosts).
+unsafe fn lookup(name: &str, primary: *mut c_void) -> *mut c_void {
+    let p = dlsym_named(primary, name);
+    if !p.is_null() {
+        return p;
     }
-    p
+    let h = line_lib();
+    if h.is_null() {
+        return std::ptr::null_mut();
+    }
+    dlsym_named(h, name)
 }
 
 unsafe fn resolve_fn<T: Copy>(name: &str) -> Option<T> {
-    let p = resolve_raw(name);
+    let p = lookup(name, libc::RTLD_DEFAULT);
     if p.is_null() {
         None
     } else {
@@ -99,17 +83,28 @@ unsafe fn resolve_fn<T: Copy>(name: &str) -> Option<T> {
 }
 
 unsafe fn resolve_var<T>(name: &str) -> *mut T {
-    resolve_raw(name) as *mut T
+    lookup(name, libc::RTLD_DEFAULT) as *mut T
+}
+
+/// Like `resolve_fn` but starts the lookup from RTLD_NEXT — for interposed
+/// symbols where we want the *real* implementation underneath our wrapper.
+unsafe fn resolve_next<T: Copy>(name: &str) -> Option<T> {
+    let p = lookup(name, libc::RTLD_NEXT);
+    if p.is_null() {
+        None
+    } else {
+        Some(std::mem::transmute_copy(&p))
+    }
 }
 
 struct Symbols {
     rl_add_defun:
         Option<unsafe extern "C" fn(*const c_char, rl_command_func_t, c_int) -> c_int>,
-    rl_replace_line: Option<unsafe extern "C" fn(*const c_char, c_int)>,
     rl_kill_text: Option<unsafe extern "C" fn(c_int, c_int) -> c_int>,
     rl_insert_text: Option<unsafe extern "C" fn(*const c_char) -> c_int>,
     rl_forced_update_display: Option<unsafe extern "C" fn() -> c_int>,
     rl_on_new_line: Option<unsafe extern "C" fn() -> c_int>,
+    rl_reverse_search_history: Option<unsafe extern "C" fn(c_int, c_int) -> c_int>,
     history_list: Option<unsafe extern "C" fn() -> *const *const HistEntry>,
     rl_line_buffer: *mut *mut c_char,
     rl_point: *mut c_int,
@@ -124,11 +119,11 @@ fn syms() -> &'static Symbols {
     S.get_or_init(|| unsafe {
         Symbols {
             rl_add_defun: resolve_fn("rl_add_defun"),
-            rl_replace_line: resolve_fn("rl_replace_line"),
             rl_kill_text: resolve_fn("rl_kill_text"),
             rl_insert_text: resolve_fn("rl_insert_text"),
             rl_forced_update_display: resolve_fn("rl_forced_update_display"),
             rl_on_new_line: resolve_fn("rl_on_new_line"),
+            rl_reverse_search_history: resolve_fn("rl_reverse_search_history"),
             history_list: resolve_fn("history_list"),
             rl_line_buffer: resolve_var("rl_line_buffer"),
             rl_point: resolve_var("rl_point"),
@@ -147,6 +142,13 @@ fn dbg(msg: &str) {
     }
 }
 
+fn warn_once(msg: &str) {
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        eprintln!("[rl_custom_isearch] {}", msg);
+    });
+}
+
 static REGISTERED: Once = Once::new();
 
 fn register_keys() {
@@ -156,23 +158,33 @@ fn register_keys() {
             dbg("rl_add_defun not found; cannot register");
             return;
         };
-        // Name matches the legacy hack, so the old .inputrc still works for users
-        // mid-migration.
-        let name = Box::leak(Box::new(CString::new("rl_custom_isearch").unwrap()));
+        // Readline stores the name pointer without copying, so the lifetime
+        // must outlive the process. Static byte literal is the simplest way.
+        // Name matches the legacy hack so old .inputrc setups still work for
+        // users mid-migration.
+        let name = b"rl_custom_isearch\0".as_ptr() as *const c_char;
         unsafe {
-            // rl_add_defun(name, fn, key) registers the name AND binds the key in one call.
-            // Works on both GNU readline and libedit's emul layer.
-            let r1 = add_defun(name.as_ptr(), custom_isearch, 0x12); // ^R
-            let r2 = add_defun(name.as_ptr(), custom_isearch, 0x13); // ^S
+            // rl_add_defun(name, fn, key) registers the name AND binds the key
+            // in one call. Works on both GNU readline and libedit's emul layer.
+            let r1 = add_defun(name, custom_isearch, CTRL_R);
+            let r2 = add_defun(name, custom_isearch, CTRL_S);
             dbg(&format!("rl_add_defun ^R={} ^S={}", r1, r2));
         }
     });
 }
 
-extern "C" fn custom_isearch(_count: c_int, _key: c_int) -> c_int {
+extern "C" fn custom_isearch(count: c_int, key: c_int) -> c_int {
     dbg("custom_isearch invoked");
     if let Err(e) = run_fzf() {
         dbg(&format!("fzf error: {}", e));
+        warn_once(&format!(
+            "fzf invocation failed ({}); falling back to readline reverse-search",
+            e
+        ));
+        let s = syms();
+        if let Some(fallback) = s.rl_reverse_search_history {
+            unsafe { fallback(count, key) };
+        }
     }
     0
 }
@@ -188,9 +200,12 @@ fn collect_history(s: &Symbols) -> Vec<Vec<u8>> {
             return out;
         }
         while !(*p).is_null() {
-            let entry = &**p;
-            if !entry.line.is_null() {
-                out.push(CStr::from_ptr(entry.line).to_bytes().to_vec());
+            // Read just the line pointer (the first field on every HIST_ENTRY
+            // variant) without forming a reference that would commit to a
+            // particular struct size.
+            let line_ptr: *const c_char = std::ptr::read(*p as *const *const c_char);
+            if !line_ptr.is_null() {
+                out.push(CStr::from_ptr(line_ptr).to_bytes().to_vec());
             }
             p = p.offset(1);
         }
@@ -321,12 +336,10 @@ fn shell_split(s: &str) -> Vec<String> {
 fn replace_line(s: &Symbols, text: &[u8]) -> Result<(), String> {
     let c_text = CString::new(text).map_err(|e| format!("CString: {}", e))?;
     unsafe {
-        // Preferred path: kill the existing line, then insert the new text.
-        // rl_insert_text advances the cursor as a side effect, leaving it at
-        // end-of-line on both libreadline and libedit. rl_replace_line works
-        // on libreadline but libedit doesn't sync writes to rl_point back to
-        // its internal cursor, so the cursor stays at column 0 — hence
-        // kill+insert is the portable choice.
+        // Preferred: kill the existing line, then insert. rl_insert_text
+        // advances the cursor, leaving it at end-of-line on both libreadline
+        // and libedit. (libedit's rl_replace_line exists but doesn't sync
+        // rl_point writes back to its internal cursor, so we don't use it.)
         if let (Some(kill), Some(insert)) = (s.rl_kill_text, s.rl_insert_text) {
             if !s.rl_end.is_null() && *s.rl_end > 0 {
                 kill(0, *s.rl_end);
@@ -335,16 +348,9 @@ fn replace_line(s: &Symbols, text: &[u8]) -> Result<(), String> {
                 *s.rl_point = 0;
             }
             insert(c_text.as_ptr());
-        } else if let Some(replace) = s.rl_replace_line {
-            replace(c_text.as_ptr(), 0);
-            let len = text.len() as c_int;
-            if !s.rl_point.is_null() {
-                *s.rl_point = len;
-            }
-            if !s.rl_end.is_null() {
-                *s.rl_end = len;
-            }
         } else if let Some(insert) = s.rl_insert_text {
+            // Fallback for older libedit without rl_kill_text: poke the buffer
+            // empty, then insert.
             if !s.rl_line_buffer.is_null() && !(*s.rl_line_buffer).is_null() {
                 **s.rl_line_buffer = 0;
             }
@@ -362,29 +368,12 @@ fn replace_line(s: &Symbols, text: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-unsafe fn resolve_real<T: Copy>(name: &str) -> Option<T> {
-    // First try RTLD_NEXT (correct semantics for LD_PRELOAD wrappers when symbol is global)
-    let mut p = dlsym_named(libc::RTLD_NEXT, name);
-    // Fall back to direct handle (covers RTLD_LOCAL'd libreadline/libedit, e.g. Python)
-    if p.is_null() {
-        let h = line_lib();
-        if !h.is_null() {
-            p = dlsym_named(h, name);
-        }
-    }
-    if p.is_null() {
-        None
-    } else {
-        Some(std::mem::transmute_copy(&p))
-    }
-}
-
 #[no_mangle]
 pub unsafe extern "C" fn readline(prompt: *const c_char) -> *mut c_char {
     register_keys();
     static REAL: OnceLock<Option<unsafe extern "C" fn(*const c_char) -> *mut c_char>> =
         OnceLock::new();
-    let real = REAL.get_or_init(|| resolve_real("readline"));
+    let real = REAL.get_or_init(|| resolve_next("readline"));
     match real {
         Some(f) => f(prompt),
         None => {
@@ -401,11 +390,57 @@ pub unsafe extern "C" fn rl_callback_handler_install(
 ) {
     static REAL: OnceLock<Option<unsafe extern "C" fn(*const c_char, rl_vcpfunc_t)>> =
         OnceLock::new();
-    let real = REAL.get_or_init(|| resolve_real("rl_callback_handler_install"));
+    let real = REAL.get_or_init(|| resolve_next("rl_callback_handler_install"));
     if let Some(f) = real {
         f(prompt, lhandler);
     } else {
         dbg("real rl_callback_handler_install not found");
     }
     register_keys();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_split;
+
+    #[test]
+    fn splits_unquoted() {
+        assert_eq!(
+            shell_split("--height 40% --tac"),
+            vec!["--height", "40%", "--tac"]
+        );
+    }
+
+    #[test]
+    fn collapses_whitespace() {
+        assert_eq!(shell_split("  a   b\tc "), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn double_quotes_keep_spaces() {
+        assert_eq!(
+            shell_split(r#"--bind "ctrl-d:execute(echo hi)""#),
+            vec!["--bind", "ctrl-d:execute(echo hi)"]
+        );
+    }
+
+    #[test]
+    fn single_quotes_keep_spaces() {
+        assert_eq!(
+            shell_split("--preview 'cat -A'"),
+            vec!["--preview", "cat -A"]
+        );
+    }
+
+    #[test]
+    fn nested_quotes_are_literal() {
+        // Inner ' inside "..." is preserved as-is.
+        assert_eq!(shell_split(r#""it's""#), vec!["it's"]);
+    }
+
+    #[test]
+    fn empty_input() {
+        assert!(shell_split("").is_empty());
+        assert!(shell_split("   ").is_empty());
+    }
 }
