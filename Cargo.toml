@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2021"
 authors = [
     "Cheney Lin <lincheney@gmail.com>",
-    "David Leibovic <dleibovic@etsy.com>",
+    "David Leibovic <dasl@php.net>",
 ]
 license = "GPL-3.0-or-later"
 
