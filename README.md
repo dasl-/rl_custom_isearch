@@ -132,6 +132,45 @@ If a user `.inputrc` rebinds `Ctrl+R` to something else, that binding wins
 which is after we register, so an explicit `"\C-r": ...` line in your
 inputrc takes precedence over the shim.
 
+### Caveat: `irb --legacy` history persistence on Debian/Ubuntu
+
+If you find that `irb --legacy` history doesn't persist across sessions,
+that's an upstream Ruby bug, not a shim bug. Ruby's `readline.so`
+extension on Debian/Ubuntu is built against libedit ([`Readline::VERSION
+= "EditLine wrapper"`](https://github.com/ruby/readline-ext)). On the
+first `Readline.readline()` call, libedit lazily initializes its
+`EditLine` state and **wipes** the existing `Readline::HISTORY` array —
+including the entries that `IRB::HistorySavingAbility#load_history` just
+populated from `~/.irb_history`. At exit, `save_history` writes only
+this session's entries back, truncating the rest. See [Ruby Bug
+#17629](https://bugs.ruby-lang.org/issues/17629).
+
+The fix landed in `ruby/readline-ext` upstream but hasn't necessarily
+been backported into your distro's bundled version. Two options:
+
+1. **Upgrade `readline-ext`:**
+   ```bash
+   gem install readline-ext   # latest is 0.2.0+
+   ```
+   The gem version takes precedence over the default-gem on
+   `require "readline"`.
+2. **`~/.irbrc` workaround** — defer the history load until *after* the
+   first `Readline.readline()` call:
+   ```ruby
+   require 'readline'
+   IRB.conf[:SAVE_HISTORY] ||= 1000
+   histfile = File.expand_path(IRB.conf[:HISTORY_FILE] || '~/.irb_history')
+   loaded = false
+   original = Readline.method(:readline)
+   Readline.define_singleton_method(:readline) do |*args|
+     unless loaded
+       loaded = true
+       File.foreach(histfile) { |l| Readline::HISTORY << l.chomp } if File.exist?(histfile)
+     end
+     original.call(*args)
+   end
+   ```
+
 ## Requires
 
 - [`fzf`](https://github.com/junegunn/fzf) on `$PATH` for the fzf UI. If
