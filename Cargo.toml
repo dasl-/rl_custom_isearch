@@ -1,12 +1,23 @@
 [package]
 name = "rl_custom_isearch"
-version = "0.1.0"
-authors = ["Cheney Lin <lincheney@gmail.com>"]
+version = "0.2.0"
+edition = "2021"
+authors = [
+    "Cheney Lin <lincheney@gmail.com>",
+    "David Leibovic <dleibovic@etsy.com>",
+]
+license = "GPL-3.0-or-later"
 
 [dependencies]
-libc = "0.2.66"
-lazy_static = "1.4.0"
+libc = "0.2"
 
 [lib]
 name = "rl_custom_isearch"
 crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
