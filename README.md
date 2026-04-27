@@ -28,10 +28,10 @@ This branch removes the indirection. The library:
   `dl_iterate_phdr` fallback for hosts that load readline with `RTLD_LOCAL`
   (e.g. CPython's `readline` C extension).
 - **Works against both GNU readline and libedit's readline-emul layer**,
-  detecting available capabilities (`rl_replace_line`, `rl_kill_text`,
-  `rl_insert_text`) at runtime. This means it works for libedit-linked
-  binaries like Homebrew/Linuxbrew `mysql` and `python3` (with
-  `PYTHON_BASIC_REPL=1`).
+  detecting available line-replacement primitives (`rl_kill_text +
+  rl_insert_text`, with a buffer-poke fallback for older libedit) at
+  runtime. This means it works for libedit-linked binaries like
+  Homebrew/Linuxbrew `mysql` and `python3` (with `PYTHON_BASIC_REPL=1`).
 - Survives `-Bsymbolic-functions`-built libreadline (Debian/Ubuntu) by not
   relying on intra-libreadline call interposition.
 
@@ -41,7 +41,7 @@ This branch removes the indirection. The library:
 cargo build --release
 ```
 
-Output: `./target/release/librl_custom_isearch.so` (~370 KB).
+Output: `./target/release/librl_custom_isearch.so` (~380 KB).
 
 ## Use
 
@@ -91,7 +91,10 @@ inputrc takes precedence over the shim.
 
 ## Requires
 
-- [`fzf`](https://github.com/junegunn/fzf) on `$PATH`.
+- [`fzf`](https://github.com/junegunn/fzf) on `$PATH` for the fzf UI. If
+  `fzf` is missing or fails to spawn, the shim logs a one-time warning to
+  stderr and falls back to readline's built-in reverse-search-history, so
+  `Ctrl+R` still does *something* useful instead of being a dead key.
 
 ## License
 

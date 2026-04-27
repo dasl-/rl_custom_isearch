@@ -13,9 +13,13 @@ type rl_vcpfunc_t = extern "C" fn(*mut c_char);
 const CTRL_R: c_int = 0x12;
 const CTRL_S: c_int = 0x13;
 
-// Opaque: HIST_ENTRY layout differs between libreadline (line, timestamp, data)
-// and libedit (line, data). We never form a Rust reference to the whole struct;
-// callers read just the line pointer via raw projection.
+// Opaque pointee for HIST_ENTRY*. Layout differs between libreadline
+// (line, timestamp, data) and libedit (line, data), so we cannot pick one
+// `#[repr(C)] struct` definition that's correct on both. The zero-variant-enum
+// idiom is Rust's standard shape for an opaque FFI type: addresses are valid
+// but the value is uninhabited, so a `*const HistEntry` can be held and
+// offset but never dereferenced. `collect_history` reads just the first
+// pointer (the `line` field, common to both layouts) via raw projection.
 enum HistEntry {}
 
 unsafe fn dlsym_named(handle: *mut c_void, name: &str) -> *mut c_void {
@@ -370,6 +374,11 @@ fn replace_line(s: &Symbols, text: &[u8]) -> Result<(), String> {
 
 #[no_mangle]
 pub unsafe extern "C" fn readline(prompt: *const c_char) -> *mut c_char {
+    // Register BEFORE the real call: real readline blocks until the user
+    // submits a line, so registering after would miss the very first prompt.
+    // rl_add_defun is safe pre-init on libreadline (the static keymap exists
+    // at process start) and on libedit's emul layer (the funmap is created
+    // lazily inside the first add_defun call).
     register_keys();
     static REAL: OnceLock<Option<unsafe extern "C" fn(*const c_char) -> *mut c_char>> =
         OnceLock::new();
@@ -377,6 +386,9 @@ pub unsafe extern "C" fn readline(prompt: *const c_char) -> *mut c_char {
     match real {
         Some(f) => f(prompt),
         None => {
+            // No real readline reachable. Returning NULL is the readline API
+            // signal for EOF (Ctrl-D), so the host treats the prompt as
+            // cleanly ended instead of crashing on a bogus pointer.
             dbg("real readline not found");
             std::ptr::null_mut()
         }
@@ -396,6 +408,11 @@ pub unsafe extern "C" fn rl_callback_handler_install(
     } else {
         dbg("real rl_callback_handler_install not found");
     }
+    // Register AFTER the real installer. The installer is non-blocking
+    // (it just wires up callback state for the eventless main loop), so we
+    // can run our binding setup once it returns. Doing it after also matches
+    // the order the original inputrc-driven flow had — readline init runs,
+    // then keymap modifications stick on the freshly-prepared keymap.
     register_keys();
 }
 
