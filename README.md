@@ -55,13 +55,23 @@ Output: `./target/release/librl_custom_isearch.so` (~380 KB).
 ```bash
 LD_PRELOAD=/path/to/librl_custom_isearch.so php -a
 LD_PRELOAD=/path/to/librl_custom_isearch.so mysql
-LD_PRELOAD=/path/to/librl_custom_isearch.so PYTHON_BASIC_REPL=1 python3 -i
+LD_PRELOAD=/path/to/librl_custom_isearch.so PYTHON_BASIC_REPL=1 PYTHON_HISTORY=$HOME/.python_history_basic python3 -i
 LD_PRELOAD=/path/to/librl_custom_isearch.so irb --legacy
 ```
 
 `PYTHON_BASIC_REPL=1` is required on Python 3.13+ to bypass `_pyrepl`
 (the pure-Python line editor that doesn't go through readline). On older
 Python it's harmless.
+
+`PYTHON_HISTORY` (Python 3.13+) routes the basic-repl history into its own
+file, separate from the default `~/.python_history` that `_pyrepl`
+sessions write to. Without this, alternating between
+`PYTHON_BASIC_REPL=1` and a plain `python3` can silently wipe your
+history: the two modes write subtly different formats, and any session
+whose history *load* fails starts with an empty in-memory list and
+truncates the file on clean exit (Python registers
+`readline.write_history_file` as an `atexit` hook, which rewrites the
+whole file, not appends).
 
 `--legacy` is required on modern `irb` to bypass `reline` (the pure-Ruby
 line editor) and use the `readline` extension instead, which is what this
