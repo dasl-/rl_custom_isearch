@@ -118,14 +118,57 @@ readline/libedit entirely cannot be intercepted by this shim:
 - **Modern `irb`** uses `reline` (pure Ruby). Pass `--legacy` to use the
   `readline` extension instead.
 
-Programs that statically embed readline rather than linking it as a shared
-library also can't be intercepted, because their internal calls to
-`readline()` don't go through the dynamic linker:
+Programs that statically embed readline (or ship their own in-tree line
+editor) rather than linking against `libreadline.so` / `libedit.so` also
+can't be intercepted directly, because their internal input calls don't
+go through the dynamic linker:
 
 - **`bash` on Debian/Ubuntu** is built with bundled readline sources
   compiled into the binary. `ldd $(which bash)` shows no `libreadline.so`
   dependency. (Some older distros and custom builds dynamically link
   libreadline; those would work.)
+- **Percona Server `mysql` 8.0.x** ships an in-tree line editor and
+  links neither libreadline nor libedit (`ldd ~/path/to/mysql | grep -E
+  "readline|edit"` is empty). Oracle/Percona swapped GNU readline out
+  for license reasons years ago. The `mysql` shipped by most Linux
+  distros (which dynamically links `libedit.so`) does work — this is
+  specific to Percona/Oracle binary builds.
+
+For binaries in this category, [`rlwrap`](https://github.com/hanslub42/rlwrap)
+is the workaround: it runs the target in a pty and provides its own
+readline-driven input layer in the *parent* process. Since rlwrap
+dynamically links libreadline, this shim hooks rlwrap's input loop and
+^R / fzf works there:
+
+```bash
+rlwrap -a /path/to/embedded-readline-program ...
+```
+
+`-a` (always-readline) forces rlwrap to use readline regardless of how
+the child's prompt looks; without it, rlwrap's prompt-detection
+heuristic may keep it in pass-through mode and your keystrokes go
+straight to the child's embedded editor, where the shim has no reach.
+
+**History-file format mismatch caveat with rlwrap.** rlwrap stores
+history in `~/.<progname>_history` by default, which can collide with a
+file the target binary itself wrote in a different format. For example,
+Percona's `mysql` writes `~/.mysql_history` using libedit's
+`_HiStOrY_V2_` escaped format (`\040` for space, `\134` for backslash);
+GNU readline (via rlwrap) reads those escapes verbatim, so fzf displays
+mangled history and selecting an entry inserts the escaped string into
+the prompt. Two fixes:
+
+- **Convert the existing file once:**
+  ```bash
+  sed -i.bak 's/\\040/ /g; s/\\134/\\/g' ~/.<progname>_history
+  ```
+  Caveat: running the target binary directly afterwards will re-escape
+  on save, drifting the format again.
+- **Use a separate history file for the rlwrap'd session** via rlwrap's
+  `-H` flag (analogous to `PYTHON_HISTORY` for python):
+  ```bash
+  rlwrap -a -H ~/.rlwrap_<progname>_history /path/to/program ...
+  ```
 
 If a user `.inputrc` rebinds `Ctrl+R` to something else, that binding wins
 — readline's init reads `~/.inputrc` after the first `readline()` call,
