@@ -55,13 +55,17 @@ Output: `./target/release/librl_custom_isearch.so` (~380 KB).
 ```bash
 LD_PRELOAD=/path/to/librl_custom_isearch.so php -a
 LD_PRELOAD=/path/to/librl_custom_isearch.so mysql
-PYTHON_BASIC_REPL=1 LD_PRELOAD=/path/to/librl_custom_isearch.so python3 -i
+LD_PRELOAD=/path/to/librl_custom_isearch.so PYTHON_BASIC_REPL=1 python3 -i
 LD_PRELOAD=/path/to/librl_custom_isearch.so irb --legacy
 ```
 
 `PYTHON_BASIC_REPL=1` is required on Python 3.13+ to bypass `_pyrepl`
 (the pure-Python line editor that doesn't go through readline). On older
 Python it's harmless.
+
+`--legacy` is required on modern `irb` to bypass `reline` (the pure-Ruby
+line editor) and use the `readline` extension instead, which is what this
+shim hooks. On older `irb` it's harmless.
 
 Press `Ctrl+R` (or `Ctrl+S`) to invoke fzf over the current history. The
 selected entry replaces the current line and the cursor lands at
